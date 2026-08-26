@@ -1,10 +1,10 @@
-import { useState, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Target, ListChecks, ClipboardCheck, BarChart3,
   Plus, Pencil, Trash2, X, Check,
   CheckCircle2, Circle, ChevronLeft, ChevronRight,
   Sparkles, Bot, TrendingUp, Trophy, Flame,
-  AlertTriangle, XCircle,
+  AlertTriangle, XCircle, RotateCcw,
 } from 'lucide-react';
 import {
   ResponsiveContainer, BarChart, Bar, Cell, XAxis, YAxis,
@@ -12,8 +12,24 @@ import {
 } from 'recharts';
 
 const TOTAL_WEEKS = 12;
+const STORAGE_KEY = 'twelve-week-year-data-v1';
 
 const uid = () => `id_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+// Читаем сохранённые данные из localStorage браузера.
+// Если данных нет или они повреждены — возвращаем null, и компонент
+// подставит демо-данные по умолчанию.
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.goals) || typeof parsed.completions !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 const pluralTactics = (n) => {
   const mod10 = n % 10;
@@ -171,15 +187,32 @@ function StatTile({ icon: Icon, label, value, accent }) {
 }
 
 export default function TwelveWeekYearApp() {
-  const [goals, setGoals] = useState(seedGoals);
-  const [completions, setCompletions] = useState(seedCompletions);
-  const [currentWeek, setCurrentWeek] = useState(4);
+  // Ленивая инициализация: loadState() выполняется только один раз при первом
+  // рендере, а не при каждом обновлении состояния.
+  const [goals, setGoals] = useState(() => loadState()?.goals ?? seedGoals);
+  const [completions, setCompletions] = useState(() => loadState()?.completions ?? seedCompletions);
+  const [currentWeek, setCurrentWeek] = useState(() => loadState()?.currentWeek ?? 4);
   const [activeScreen, setActiveScreen] = useState('week');
-  const [activeGoalId, setActiveGoalId] = useState(seedGoals[0].id);
+  const [activeGoalId, setActiveGoalId] = useState(() => loadState()?.activeGoalId ?? seedGoals[0]?.id ?? null);
   const [goalForm, setGoalForm] = useState(null);
   const [tacticInput, setTacticInput] = useState('');
   const [advice, setAdvice] = useState(null);
   const [lastAdviceIdx, setLastAdviceIdx] = useState({});
+
+  // Автосохранение: при любом изменении целей, тактик, отметок, недели или
+  // выбранной цели — записываем всё одним объектом в localStorage браузера.
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ goals, completions, currentWeek, activeGoalId })
+      );
+    } catch {
+      // localStorage недоступен (например, приватный режим с отключённым
+      // хранилищем) — молча игнорируем, приложение продолжит работать
+      // без сохранения между визитами.
+    }
+  }, [goals, completions, currentWeek, activeGoalId]);
 
   const allTactics = useMemo(
     () => goals.flatMap((g) => g.tactics.map((t) => ({ ...t, goalId: g.id, goalTitle: g.title }))),
@@ -278,6 +311,20 @@ export default function TwelveWeekYearApp() {
   const selectWeek = (week) => {
     setCurrentWeek(week);
     setAdvice(null);
+  };
+
+  const resetAll = () => {
+    const confirmed = window.confirm(
+      'Это удалит все цели, тактики и отметки о выполнении без возможности восстановить. Начать новый 12-недельный год с чистого листа?'
+    );
+    if (!confirmed) return;
+    localStorage.removeItem(STORAGE_KEY);
+    setGoals([]);
+    setCompletions({});
+    setCurrentWeek(1);
+    setActiveGoalId(null);
+    setAdvice(null);
+    setActiveScreen('vision');
   };
 
   return (
@@ -667,6 +714,14 @@ export default function TwelveWeekYearApp() {
                   </BarChart>
                 </ResponsiveContainer>
               </div>
+
+              <button
+                type="button"
+                onClick={resetAll}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-800 py-2.5 text-xs font-medium text-neutral-600 hover:border-rose-800 hover:text-rose-400"
+              >
+                <RotateCcw className="h-3.5 w-3.5" /> Начать новый 12-недельный год (сбросить всё)
+              </button>
             </section>
           )}
         </main>
