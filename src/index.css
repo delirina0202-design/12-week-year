@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.font-body {
+  font-family: 'Inter', ui-sans-serif, sans-serif;
+}
+.font-display {
+  font-family: 'Oswald', sans-serif;
+  letter-spacing: 0.01em;
+}
+.font-mono-score {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
