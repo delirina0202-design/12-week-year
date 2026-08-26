@@ -221,7 +221,16 @@ export default function TwelveWeekYearApp() {
     });
     setAuthBusy(false);
     if (error) {
-      setAuthError('Не получилось отправить ссылку. Проверьте email и попробуйте ещё раз.');
+      console.error('Supabase signInWithOtp error:', error);
+      const raw = error.message || '';
+      let friendly = raw || 'Не получилось отправить ссылку. Попробуйте ещё раз.';
+      if (/rate limit/i.test(raw)) {
+        friendly =
+          'Превышен лимит писем на этот проект Supabase (общий лимит на всех, кто пробует войти). Подождите примерно час и попробуйте снова.';
+      } else if (/invalid/i.test(raw) && /email/i.test(raw)) {
+        friendly = 'Похоже, email введён некорректно. Проверьте адрес.';
+      }
+      setAuthError(friendly);
       return;
     }
     setAuthSent(true);
