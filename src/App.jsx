@@ -4,15 +4,17 @@ import {
   Plus, Pencil, Trash2, X, Check,
   CheckCircle2, Circle, ChevronLeft, ChevronRight,
   Sparkles, Bot, TrendingUp, Trophy, Flame,
-  AlertTriangle, XCircle, RotateCcw,
+  AlertTriangle, XCircle, RotateCcw, Mail, LogOut, Loader2,
 } from 'lucide-react';
 import {
   ResponsiveContainer, BarChart, Bar, Cell, XAxis, YAxis,
   CartesianGrid, Tooltip, ReferenceLine,
 } from 'recharts';
+import { supabase } from './supabaseClient';
 
 const TOTAL_WEEKS = 12;
 const STORAGE_KEY = 'twelve-week-year-data-v1';
+const TABLE_NAME = 'tracker_data';
 
 const uid = () => `id_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -187,6 +189,50 @@ function StatTile({ icon: Icon, label, value, accent }) {
 }
 
 export default function TwelveWeekYearApp() {
+  // --- Авторизация ---
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authSent, setAuthSent] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session ?? null);
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  const handleSendMagicLink = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    const email = authEmail.trim();
+    if (!email) return;
+    setAuthBusy(true);
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: window.location.origin },
+    });
+    setAuthBusy(false);
+    if (error) {
+      setAuthError('Не получилось отправить ссылку. Проверьте email и попробуйте ещё раз.');
+      return;
+    }
+    setAuthSent(true);
+  };
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setAuthSent(false);
+    setAuthEmail('');
+  };
+
   // Ленивая инициализация: loadState() выполняется только один раз при первом
   // рендере, а не при каждом обновлении состояния.
   const [goals, setGoals] = useState(() => loadState()?.goals ?? seedGoals);
@@ -199,20 +245,69 @@ export default function TwelveWeekYearApp() {
   const [advice, setAdvice] = useState(null);
   const [lastAdviceIdx, setLastAdviceIdx] = useState({});
 
-  // Автосохранение: при любом изменении целей, тактик, отметок, недели или
-  // выбранной цели — записываем всё одним объектом в localStorage браузера.
+  // При входе в аккаунт подтягиваем данные из облака. Если это первый вход
+  // и в облаке ещё ничего нет — переносим туда то, что уже накопилось
+  // локально (или демо-данные), чтобы ничего не потерять.
   useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+    (async () => {
+      setSyncLoading(true);
+      const { data, error } = await supabase
+        .from(TABLE_NAME)
+        .select('data')
+        .eq('user_id', session.user.id)
+        .maybeSingle();
+
+      if (cancelled) return;
+
+      if (!error && data?.data) {
+        const cloud = data.data;
+        setGoals(cloud.goals ?? []);
+        setCompletions(cloud.completions ?? {});
+        setCurrentWeek(cloud.currentWeek ?? 1);
+        setActiveGoalId(cloud.activeGoalId ?? null);
+      } else {
+        const seedFromLocal = loadState() ?? {
+          goals: seedGoals,
+          completions: seedCompletions,
+          currentWeek: 4,
+          activeGoalId: seedGoals[0]?.id ?? null,
+        };
+        setGoals(seedFromLocal.goals);
+        setCompletions(seedFromLocal.completions);
+        setCurrentWeek(seedFromLocal.currentWeek);
+        setActiveGoalId(seedFromLocal.activeGoalId);
+        await supabase.from(TABLE_NAME).upsert({ user_id: session.user.id, data: seedFromLocal });
+      }
+      setSyncLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
+  // Автосохранение: всегда пишем в localStorage (работает как офлайн-кэш),
+  // а если пользователь вошёл в аккаунт — ещё и в Supabase, с небольшой
+  // задержкой, чтобы не слать запрос на каждый клик по чекбоксу.
+  useEffect(() => {
+    const snapshot = { goals, completions, currentWeek, activeGoalId };
     try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({ goals, completions, currentWeek, activeGoalId })
-      );
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
     } catch {
-      // localStorage недоступен (например, приватный режим с отключённым
-      // хранилищем) — молча игнорируем, приложение продолжит работать
-      // без сохранения между визитами.
+      // localStorage недоступен (например, приватный режим) — игнорируем.
     }
-  }, [goals, completions, currentWeek, activeGoalId]);
+    if (!session) return;
+    const timeout = setTimeout(() => {
+      supabase
+        .from(TABLE_NAME)
+        .upsert({ user_id: session.user.id, data: snapshot, updated_at: new Date().toISOString() })
+        .then(({ error }) => {
+          if (error) console.error('Ошибка синхронизации с Supabase:', error.message);
+        });
+    }, 800);
+    return () => clearTimeout(timeout);
+  }, [goals, completions, currentWeek, activeGoalId, session]);
 
   const allTactics = useMemo(
     () => goals.flatMap((g) => g.tactics.map((t) => ({ ...t, goalId: g.id, goalTitle: g.title }))),
@@ -327,6 +422,78 @@ export default function TwelveWeekYearApp() {
     setActiveScreen('vision');
   };
 
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-neutral-950 text-neutral-500">
+        <Loader2 className="h-6 w-6 animate-spin" />
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="font-body flex min-h-screen items-center justify-center bg-neutral-950 px-5 text-neutral-100">
+        <div className="w-full max-w-sm space-y-5 rounded-2xl border border-neutral-800 bg-neutral-900 p-6">
+          <div className="text-center">
+            <div className="font-mono-score mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-orange-500 text-base font-bold text-neutral-950">
+              12
+            </div>
+            <h1 className="font-display text-xl font-bold text-neutral-50">Мой 12-недельный год</h1>
+            <p className="mt-1 text-sm text-neutral-500">
+              Войдите по email, чтобы данные сохранялись за вами и были доступны на всех устройствах.
+            </p>
+          </div>
+
+          {authSent ? (
+            <div className="rounded-xl border border-emerald-800 bg-neutral-950 p-4 text-center">
+              <Mail className="mx-auto mb-2 h-5 w-5 text-emerald-400" />
+              <p className="text-sm text-neutral-300">
+                Мы отправили ссылку для входа на <span className="font-semibold">{authEmail}</span>. Откройте почту и
+                перейдите по ссылке.
+              </p>
+              <button
+                type="button"
+                onClick={() => setAuthSent(false)}
+                className="mt-3 text-xs text-neutral-500 underline"
+              >
+                Отправить на другой email
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={handleSendMagicLink} className="space-y-3">
+              <input
+                type="email"
+                required
+                autoFocus
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                placeholder="you@example.com"
+                className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-3 py-2.5 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:ring-2 focus:ring-orange-500"
+              />
+              {authError && <p className="text-xs text-rose-400">{authError}</p>}
+              <button
+                type="submit"
+                disabled={authBusy}
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-500 py-2.5 text-sm font-semibold text-neutral-950 disabled:opacity-50"
+              >
+                {authBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+                Получить ссылку для входа
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (syncLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center gap-2 bg-neutral-950 text-sm text-neutral-500">
+        <Loader2 className="h-5 w-5 animate-spin" /> Синхронизация данных…
+      </div>
+    );
+  }
+
   return (
     <div className="font-body min-h-screen bg-neutral-950 text-neutral-100">
       <div className="mx-auto flex min-h-screen max-w-md flex-col">
@@ -339,9 +506,19 @@ export default function TwelveWeekYearApp() {
               Мой 12-недельный год
             </span>
           </div>
-          <span className="font-mono-score rounded-full border border-neutral-800 px-2.5 py-1 text-xs text-neutral-400">
-            {currentWeek}/{TOTAL_WEEKS}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="font-mono-score rounded-full border border-neutral-800 px-2.5 py-1 text-xs text-neutral-400">
+              {currentWeek}/{TOTAL_WEEKS}
+            </span>
+            <button
+              type="button"
+              onClick={handleSignOut}
+              title={`Выйти (${session.user.email})`}
+              className="rounded-lg border border-neutral-800 p-1.5 text-neutral-500 hover:text-rose-400"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </header>
 
         <main className="flex-1 px-5 pb-28 pt-5">
