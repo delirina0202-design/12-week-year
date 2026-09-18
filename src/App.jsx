@@ -33,6 +33,27 @@ function loadState() {
   }
 }
 
+// Приводит цели/тактики к новому формату: у каждой тактики есть startWeek
+// (с какой недели действует) и endWeek (по какую, null = бессрочно).
+// Старые сохранённые данные (без этих полей) трактуются как "тактика
+// действовала всегда" — это сохраняет прежнее поведение для уже
+// существующих пользователей.
+function normalizeGoals(goals) {
+  return (goals ?? []).map((g) => ({
+    ...g,
+    tactics: (g.tactics ?? []).map((t) => ({
+      ...t,
+      startWeek: t.startWeek ?? 1,
+      endWeek: t.endWeek === undefined ? null : t.endWeek,
+    })),
+  }));
+}
+
+// Тактики, действующие на конкретной неделе (с учётом startWeek/endWeek).
+function tacticsActiveInWeek(allTactics, week) {
+  return allTactics.filter((t) => t.startWeek <= week && (t.endWeek == null || week <= t.endWeek));
+}
+
 const pluralTactics = (n) => {
   const mod10 = n % 10;
   const mod100 = n % 100;
@@ -244,7 +265,7 @@ export default function TwelveWeekYearApp() {
 
   // Ленивая инициализация: loadState() выполняется только один раз при первом
   // рендере, а не при каждом обновлении состояния.
-  const [goals, setGoals] = useState(() => loadState()?.goals ?? seedGoals);
+  const [goals, setGoals] = useState(() => normalizeGoals(loadState()?.goals ?? seedGoals));
   const [completions, setCompletions] = useState(() => loadState()?.completions ?? seedCompletions);
   const [currentWeek, setCurrentWeek] = useState(() => loadState()?.currentWeek ?? 4);
   const [activeScreen, setActiveScreen] = useState('week');
@@ -272,7 +293,7 @@ export default function TwelveWeekYearApp() {
 
       if (!error && data?.data) {
         const cloud = data.data;
-        setGoals(cloud.goals ?? []);
+        setGoals(normalizeGoals(cloud.goals ?? []));
         setCompletions(cloud.completions ?? {});
         setCurrentWeek(cloud.currentWeek ?? 1);
         setActiveGoalId(cloud.activeGoalId ?? null);
@@ -283,11 +304,14 @@ export default function TwelveWeekYearApp() {
           currentWeek: 4,
           activeGoalId: seedGoals[0]?.id ?? null,
         };
-        setGoals(seedFromLocal.goals);
+        const normalizedGoals = normalizeGoals(seedFromLocal.goals);
+        setGoals(normalizedGoals);
         setCompletions(seedFromLocal.completions);
         setCurrentWeek(seedFromLocal.currentWeek);
         setActiveGoalId(seedFromLocal.activeGoalId);
-        await supabase.from(TABLE_NAME).upsert({ user_id: session.user.id, data: seedFromLocal });
+        await supabase
+          .from(TABLE_NAME)
+          .upsert({ user_id: session.user.id, data: { ...seedFromLocal, goals: normalizedGoals } });
       }
       setSyncLoading(false);
     })();
@@ -324,10 +348,14 @@ export default function TwelveWeekYearApp() {
   );
 
   const weekScore = (week) => {
-    if (allTactics.length === 0) return 0;
-    const done = allTactics.filter((t) => completions[week]?.[t.id]).length;
-    return Math.round((done / allTactics.length) * 100);
+    const active = tacticsActiveInWeek(allTactics, week);
+    if (active.length === 0) return 0;
+    const done = active.filter((t) => completions[week]?.[t.id]).length;
+    return Math.round((done / active.length) * 100);
   };
+
+  // Тактики, которые нужно показывать в чек-листе текущей недели.
+  const weekTactics = tacticsActiveInWeek(allTactics, currentWeek);
 
   const currentScore = weekScore(currentWeek);
   const currentStatusKey = getStatusKey(currentScore);
@@ -388,13 +416,36 @@ export default function TwelveWeekYearApp() {
     const text = tacticInput.trim();
     if (!text || !selectedGoalId) return;
     setGoals((gs) =>
-      gs.map((g) => (g.id === selectedGoalId ? { ...g, tactics: [...g.tactics, { id: uid(), text }] } : g))
+      gs.map((g) =>
+        g.id === selectedGoalId
+          ? { ...g, tactics: [...g.tactics, { id: uid(), text, startWeek: currentWeek, endWeek: null }] }
+          : g
+      )
     );
     setTacticInput('');
   };
 
+  // "Удаление" тактики не стирает историю по уже пройденным неделям:
+  // если тактика существовала до текущей недели, она просто перестаёт
+  // действовать начиная с текущей недели (endWeek = currentWeek - 1).
+  // Если тактика появилась только в текущей неделе (сохранять нечего),
+  // она удаляется полностью.
   const deleteTactic = (goalId, tacticId) => {
-    setGoals((gs) => gs.map((g) => (g.id === goalId ? { ...g, tactics: g.tactics.filter((t) => t.id !== tacticId) } : g)));
+    setGoals((gs) =>
+      gs.map((g) => {
+        if (g.id !== goalId) return g;
+        return {
+          ...g,
+          tactics: g.tactics
+            .map((t) => {
+              if (t.id !== tacticId) return t;
+              if (t.startWeek >= currentWeek) return null;
+              return { ...t, endWeek: currentWeek - 1 };
+            })
+            .filter(Boolean),
+        };
+      })
+    );
   };
 
   const requestAdvice = () => {
@@ -685,22 +736,30 @@ export default function TwelveWeekYearApp() {
                     <>
                       {selectedGoal.description && <p className="text-sm text-neutral-500">{selectedGoal.description}</p>}
                       <div className="space-y-2">
-                        {selectedGoal.tactics.map((t) => (
-                          <div
-                            key={t.id}
-                            className="flex items-center justify-between gap-3 rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-3"
-                          >
-                            <span className="text-sm text-neutral-200">{t.text}</span>
-                            <button
-                              type="button"
-                              onClick={() => deleteTactic(selectedGoal.id, t.id)}
-                              className="flex-shrink-0 rounded-lg p-1.5 text-neutral-600 hover:bg-neutral-800 hover:text-rose-400"
+                        {selectedGoal.tactics
+                          .filter((t) => t.endWeek == null || currentWeek <= t.endWeek)
+                          .map((t) => (
+                            <div
+                              key={t.id}
+                              className="flex items-center justify-between gap-3 rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-3"
                             >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </div>
-                        ))}
-                        {selectedGoal.tactics.length === 0 && (
+                              <span className="flex flex-col">
+                                <span className="text-sm text-neutral-200">{t.text}</span>
+                                {t.startWeek > 1 && (
+                                  <span className="mt-0.5 text-xs text-neutral-600">с недели {t.startWeek}</span>
+                                )}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => deleteTactic(selectedGoal.id, t.id)}
+                                className="flex-shrink-0 rounded-lg p-1.5 text-neutral-600 hover:bg-neutral-800 hover:text-rose-400"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          ))}
+                        {selectedGoal.tactics.filter((t) => t.endWeek == null || currentWeek <= t.endWeek).length ===
+                          0 && (
                           <div className="rounded-xl border border-dashed border-neutral-800 p-5 text-center">
                             <ListChecks className="mx-auto mb-2 h-5 w-5 text-neutral-600" />
                             <p className="text-sm text-neutral-500">Добавьте первую тактику для этой цели.</p>
@@ -724,7 +783,8 @@ export default function TwelveWeekYearApp() {
                         </button>
                       </form>
                       <p className="text-xs text-neutral-600">
-                        Обычно достаточно 3–5 тактик на цель, чтобы удержать фокус на неделю.
+                        Новые тактики действуют начиная с недели {currentWeek} (текущей). Удаление не трогает уже
+                        пройденные недели — тактика просто перестаёт учитываться начиная с недели {currentWeek}.
                       </p>
                     </>
                   )}
@@ -794,9 +854,16 @@ export default function TwelveWeekYearApp() {
                     Перейти к тактикам
                   </button>
                 </div>
+              ) : weekTactics.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-neutral-800 p-6 text-center">
+                  <p className="text-sm text-neutral-500">
+                    На неделе {currentWeek} нет активных тактик — они либо ещё не начались, либо уже завершены.
+                    Загляните на вкладку «Тактики», чтобы что-то добавить.
+                  </p>
+                </div>
               ) : (
                 <div className="space-y-2">
-                  {allTactics.map((t) => {
+                  {weekTactics.map((t) => {
                     const checked = !!completions[currentWeek]?.[t.id];
                     return (
                       <button
@@ -825,7 +892,7 @@ export default function TwelveWeekYearApp() {
               <button
                 type="button"
                 onClick={requestAdvice}
-                disabled={allTactics.length === 0}
+                disabled={weekTactics.length === 0}
                 className="flex w-full items-center justify-center gap-2 rounded-2xl border border-orange-500 py-3 text-sm font-semibold text-orange-400 disabled:opacity-30"
               >
                 <Sparkles className="h-4 w-4" /> Получить совет ИИ-тренера
